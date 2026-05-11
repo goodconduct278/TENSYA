@@ -34,7 +34,7 @@ def backup_file(dst_path: str, mode: str, logger: Logger) -> bool:
     folder = src.parent
     stem   = src.stem
     suffix = src.suffix
-    ts     = datetime.now().strftime('%Y%m%d_%H%M')
+    ts     = datetime.now().strftime('%Y%m%d_%H%M%S')
 
     if mode in ('常に作成', '実行時に確認'):
         backup_path = folder / f"{stem}_バックアップ_{ts}{suffix}"
