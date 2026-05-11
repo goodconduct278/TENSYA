@@ -10,8 +10,16 @@
 金額列（IF式）には書き込まない。
 """
 
-from openpyxl.utils import column_index_from_string, get_column_letter
+from copy import copy
+
+from openpyxl.formula.translate import Translator
+from openpyxl.worksheet.cell_range import CellRange
+from openpyxl.utils import column_index_from_string, get_column_letter, range_boundaries
+
 from logger import Logger
+
+
+BLOCK_ROWS = 3
 
 
 def _col(letter: str) -> int:
@@ -27,6 +35,106 @@ def _safe_set(ws, row: int, col_letter: str, value) -> None:
             ws.cell(merge.min_row, merge.min_col).value = value
             return
     ws.cell(row, col).value = value
+
+
+def _copy_cell(src_cell, dst_cell) -> None:
+    """値・数式・書式をテンプレートセルからコピーする。"""
+    value = src_cell.value
+    if isinstance(value, str) and value.startswith('='):
+        value = Translator(value, origin=src_cell.coordinate).translate_formula(
+            dst_cell.coordinate)
+    dst_cell.value = value
+
+    if src_cell.has_style:
+        dst_cell._style = copy(src_cell._style)
+    if src_cell.number_format:
+        dst_cell.number_format = src_cell.number_format
+    if src_cell.protection:
+        dst_cell.protection = copy(src_cell.protection)
+    if src_cell.alignment:
+        dst_cell.alignment = copy(src_cell.alignment)
+    if src_cell.hyperlink:
+        dst_cell._hyperlink = copy(src_cell.hyperlink)
+    if src_cell.comment:
+        dst_cell.comment = copy(src_cell.comment)
+
+
+def _copy_row_dimension(ws, src_row: int, dst_row: int) -> None:
+    """行高などの行設定をコピーする。"""
+    src_dim = ws.row_dimensions[src_row]
+    dst_dim = ws.row_dimensions[dst_row]
+    dst_dim.height = src_dim.height
+    dst_dim.hidden = src_dim.hidden
+    dst_dim.outlineLevel = src_dim.outlineLevel
+    dst_dim.collapsed = src_dim.collapsed
+
+
+def _template_merges(ws, template_start: int) -> list[CellRange]:
+    """テンプレート3行ブロック内に完全に含まれる結合範囲を返す。"""
+    template_end = template_start + BLOCK_ROWS - 1
+    return [
+        CellRange(str(merge))
+        for merge in ws.merged_cells.ranges
+        if template_start <= merge.min_row and merge.max_row <= template_end
+    ]
+
+
+def _copy_template_block(ws, template_start: int, dst_start: int,
+                         max_col: int, merges: list[CellRange]) -> None:
+    """直上ブロックの書式・数式・結合を追加ブロックへ複製する。"""
+    row_offset = dst_start - template_start
+    for row_offset_in_block in range(BLOCK_ROWS):
+        src_row = template_start + row_offset_in_block
+        dst_row = dst_start + row_offset_in_block
+        _copy_row_dimension(ws, src_row, dst_row)
+        for col in range(1, max_col + 1):
+            _copy_cell(ws.cell(src_row, col), ws.cell(dst_row, col))
+
+    existing_merges = {str(merge) for merge in ws.merged_cells.ranges}
+    for merge in merges:
+        shifted = CellRange(
+            min_col=merge.min_col,
+            min_row=merge.min_row + row_offset,
+            max_col=merge.max_col,
+            max_row=merge.max_row + row_offset,
+        )
+        if shifted.coord not in existing_merges:
+            ws.merge_cells(shifted.coord)
+            existing_merges.add(shifted.coord)
+
+
+def _area_without_sheet(area: str) -> str:
+    """印刷範囲文字列からシート名部分を除去する。"""
+    if '!' in area:
+        return area.split('!', 1)[1]
+    return area
+
+
+def _expand_print_area(ws, old_total_row: int, new_total_row: int,
+                       logger: Logger) -> None:
+    """行追加で合計行が下がった場合、既存の印刷範囲の下端も広げる。"""
+    if not ws.print_area:
+        return
+
+    areas = ws.print_area if isinstance(ws.print_area, list) else [ws.print_area]
+    expanded_areas: list[str] = []
+    changed = False
+
+    for area in areas:
+        raw_area = _area_without_sheet(str(area))
+        min_col, min_row, max_col, max_row = range_boundaries(raw_area)
+        if max_row >= old_total_row:
+            max_row = max(max_row, new_total_row)
+            changed = True
+        expanded_areas.append(
+            f"{get_column_letter(min_col)}{min_row}:"
+            f"{get_column_letter(max_col)}{max_row}"
+        )
+
+    if changed:
+        ws.print_area = expanded_areas
+        logger.log(
+            f"印刷範囲更新：合計行移動に合わせて{new_total_row}行目まで拡張")
 
 
 def find_total_row(ws, settings: dict) -> int:
@@ -73,21 +181,27 @@ def ensure_rows(ws, settings: dict, needed_blocks: int, logger: Logger) -> int:
         return 0
 
     start_row = settings['dst_start_row']
-    current_blocks = (total_row - start_row) // 3
+    current_blocks = (total_row - start_row) // BLOCK_ROWS
     short_blocks = needed_blocks - current_blocks
 
     if short_blocks <= 0:
         return 0
 
-    add_rows = short_blocks * 3
+    add_rows = short_blocks * BLOCK_ROWS
+    old_total_row = total_row
+    template_start = total_row - BLOCK_ROWS
+    template_merges = _template_merges(ws, template_start)
+    max_col = max(ws.max_column, _col(settings['dst_col_amount']))
 
     for _ in range(short_blocks):
         total_row = find_total_row(ws, settings)
-        ws.insert_rows(total_row, amount=3)
+        ws.insert_rows(total_row, amount=BLOCK_ROWS)
+        _copy_template_block(
+            ws, template_start, total_row, max_col, template_merges)
         # insert_rows は total_row の直前に挿入するため、
         # 合計行は total_row + 3 に移動する（find_total_row で再取得）
 
-    # 挿入された行の値をクリア（insert_rows は空行を挿入するが念のため）
+    # 挿入された行の入力値をクリア。数式・書式・結合はテンプレートから残す。
     new_total_row = find_total_row(ws, settings)
     for r in range(new_total_row - add_rows, new_total_row):
         _safe_set(ws, r, settings['dst_col_name'],  None)
@@ -95,6 +209,8 @@ def ensure_rows(ws, settings: dict, needed_blocks: int, logger: Logger) -> int:
         _safe_set(ws, r, settings['dst_col_qty'],   None)
         _safe_set(ws, r, settings['dst_col_unit'],  None)
         _safe_set(ws, r, settings['dst_col_price'], None)
+
+    _expand_print_area(ws, old_total_row, new_total_row, logger)
 
     return add_rows
 
@@ -116,7 +232,7 @@ def write_to_destination(ws, settings: dict, blocks: list[dict]) -> None:
         _safe_set(ws, write_row + 2, settings['dst_col_name'],  block['name2'])
         _safe_set(ws, write_row + 2, settings['dst_col_spec'],  block['spec3'])
 
-        write_row += 3
+        write_row += BLOCK_ROWS
 
 
 def rebuild_sum_formula(ws, settings: dict, logger: Logger) -> str:
@@ -135,7 +251,7 @@ def rebuild_sum_formula(ws, settings: dict, logger: Logger) -> str:
 
     cell_refs = [
         f"{col_letter}{r}"
-        for r in range(start_row, total_row, 3)
+        for r in range(start_row, total_row, BLOCK_ROWS)
     ]
     formula = f"=SUM({','.join(cell_refs)})"
 
