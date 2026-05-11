@@ -44,7 +44,8 @@ def _is_anchor(qty, unit: str) -> bool:
     if qty is None or qty == '':
         return False
     try:
-        float(qty)
+        if float(qty) == 0:
+            return False
     except (ValueError, TypeError):
         return False
     return bool(unit)

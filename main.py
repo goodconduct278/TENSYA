@@ -255,7 +255,14 @@ class App(tk.Tk):
                 logger.log(f'エラー：シート不在 [{src_sheet}]')
                 return
 
-            blocks = read_source_data(src_wb[src_sheet], self.settings, logger)
+            try:
+                blocks = read_source_data(src_wb[src_sheet], self.settings, logger)
+            except Exception as e:
+                messagebox.showerror(
+                    '転記ツール', f'コピー元の読み取りに失敗しました：\n{e}')
+                logger.log(f'エラー：コピー元読み取り失敗 {e}')
+                self._status_var.set('コピー元読み取りエラー')
+                return
         finally:
             src_wb.close()
 
