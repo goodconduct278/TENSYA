@@ -19,6 +19,7 @@ DEFAULT_SETTINGS = {
     "dst_col_unit":  "E",
     "dst_col_price": "F",
     "dst_col_amount":"G",
+    "dst_layout":    "3行標準",
     "sum_keyword":   "合計",
     "backup_mode":   "常に作成",
 }
