@@ -29,6 +29,12 @@ BACKUP_MODES = [
     '作成しない',
 ]
 
+DST_LAYOUTS = [
+    '3行標準',
+    '2行標準',
+    '1行標準',
+]
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 設定ダイアログ
@@ -51,9 +57,11 @@ class SettingsDialog(tk.Toplevel):
         ('dst_col_unit',   '転記先単位列'),
         ('dst_col_price',  '転記先単価列'),
         ('dst_col_amount', '転記先金額列'),
+        ('dst_layout',     '転記先レイアウト'),
         ('sum_keyword',    '合計行キーワード'),
     ]
     _INT_KEYS = {'src_start_row', 'dst_start_row'}
+    _CHOICE_FIELDS = {'dst_layout': DST_LAYOUTS}
 
     def __init__(self, parent: tk.Tk, settings: dict):
         super().__init__(parent)
@@ -71,8 +79,14 @@ class SettingsDialog(tk.Toplevel):
                 row=i, column=0, **pad, sticky='w')
             var = tk.StringVar(value=str(self.settings.get(key, '')))
             self._vars[key] = var
-            tk.Entry(self, textvariable=var, width=22).grid(
-                row=i, column=1, **pad)
+            if key in self._CHOICE_FIELDS:
+                ttk.Combobox(
+                    self, textvariable=var, values=self._CHOICE_FIELDS[key],
+                    state='readonly', width=20,
+                ).grid(row=i, column=1, **pad)
+            else:
+                tk.Entry(self, textvariable=var, width=22).grid(
+                    row=i, column=1, **pad)
 
         n = len(self._FIELDS)
         frame = tk.Frame(self)
@@ -303,7 +317,7 @@ class App(tk.Tk):
 
             added = ensure_rows(dst_ws, self.settings, len(blocks), logger)
             if added > 0:
-                logger.log(f'行追加：{added}行（{added // 3}ブロック）')
+                logger.log(f'行追加：{added}行')
             else:
                 logger.log('行追加：なし')
 
