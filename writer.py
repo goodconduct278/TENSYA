@@ -1,12 +1,8 @@
 """
 転記先（見積書）Excelシートへの書き込み処理。
 
-1明細 = 3行ブロック：
-  行N   : 仕様1 / 数量 / 単位 / 単価   （名称は空）
-  行N+1 : 名称1 / 仕様2
-  行N+2 : 名称2 / 仕様3
-
-数量・単位・単価はブロック1行目に書く（金額式が1行目を参照するため）。
+転記先レイアウトは 3行標準 / 2行標準 / 1行標準 のプリセットから選ぶ。
+数量・単位・単価は各ブロック1行目に書く（金額式が1行目を参照するため）。
 金額列（IF式）には書き込まない。
 """
 
@@ -19,7 +15,26 @@ from openpyxl.utils import column_index_from_string, get_column_letter, range_bo
 from logger import Logger
 
 
-BLOCK_ROWS = 3
+LAYOUT_3_ROWS = '3行標準'
+LAYOUT_2_ROWS = '2行標準'
+LAYOUT_1_ROW = '1行標準'
+
+BLOCK_ROWS_BY_LAYOUT = {
+    LAYOUT_3_ROWS: 3,
+    LAYOUT_2_ROWS: 2,
+    LAYOUT_1_ROW: 1,
+}
+
+
+def get_block_rows(settings: dict) -> int:
+    """設定された転記先レイアウトの1明細あたり行数を返す。"""
+    layout = settings.get('dst_layout', LAYOUT_3_ROWS)
+    return BLOCK_ROWS_BY_LAYOUT.get(layout, 3)
+
+
+def _join_lines(*values) -> str:
+    """空の要素を除外し、セル内改行で複数行情報をまとめる。"""
+    return '\n'.join(str(v).strip() for v in values if str(v or '').strip())
 
 
 def _col(letter: str) -> int:
@@ -69,9 +84,9 @@ def _copy_row_dimension(ws, src_row: int, dst_row: int) -> None:
     dst_dim.collapsed = src_dim.collapsed
 
 
-def _template_merges(ws, template_start: int) -> list[CellRange]:
-    """テンプレート3行ブロック内に完全に含まれる結合範囲を返す。"""
-    template_end = template_start + BLOCK_ROWS - 1
+def _template_merges(ws, template_start: int, block_rows: int) -> list[CellRange]:
+    """テンプレートブロック内に完全に含まれる結合範囲を返す。"""
+    template_end = template_start + block_rows - 1
     return [
         CellRange(str(merge))
         for merge in ws.merged_cells.ranges
@@ -80,10 +95,11 @@ def _template_merges(ws, template_start: int) -> list[CellRange]:
 
 
 def _copy_template_block(ws, template_start: int, dst_start: int,
-                         max_col: int, merges: list[CellRange]) -> None:
+                         block_rows: int, max_col: int,
+                         merges: list[CellRange]) -> None:
     """直上ブロックの書式・数式・結合を追加ブロックへ複製する。"""
     row_offset = dst_start - template_start
-    for row_offset_in_block in range(BLOCK_ROWS):
+    for row_offset_in_block in range(block_rows):
         src_row = template_start + row_offset_in_block
         dst_row = dst_start + row_offset_in_block
         _copy_row_dimension(ws, src_row, dst_row)
@@ -172,7 +188,7 @@ def clear_destination(ws, settings: dict) -> None:
 
 def ensure_rows(ws, settings: dict, needed_blocks: int, logger: Logger) -> int:
     """
-    必要なブロック数に対して行数が不足している場合、3行単位で行を挿入する。
+    必要なブロック数に対して行数が不足している場合、レイアウト行数単位で行を挿入する。
     戻り値：追加した行数（合計行が無い場合は0）
     """
     total_row = find_total_row(ws, settings)
@@ -181,25 +197,26 @@ def ensure_rows(ws, settings: dict, needed_blocks: int, logger: Logger) -> int:
         return 0
 
     start_row = settings['dst_start_row']
-    current_blocks = (total_row - start_row) // BLOCK_ROWS
+    block_rows = get_block_rows(settings)
+    current_blocks = (total_row - start_row) // block_rows
     short_blocks = needed_blocks - current_blocks
 
     if short_blocks <= 0:
         return 0
 
-    add_rows = short_blocks * BLOCK_ROWS
+    add_rows = short_blocks * block_rows
     old_total_row = total_row
-    template_start = total_row - BLOCK_ROWS
-    template_merges = _template_merges(ws, template_start)
+    template_start = total_row - block_rows
+    template_merges = _template_merges(ws, template_start, block_rows)
     max_col = max(ws.max_column, _col(settings['dst_col_amount']))
 
     for _ in range(short_blocks):
         total_row = find_total_row(ws, settings)
-        ws.insert_rows(total_row, amount=BLOCK_ROWS)
+        ws.insert_rows(total_row, amount=block_rows)
         _copy_template_block(
-            ws, template_start, total_row, max_col, template_merges)
+            ws, template_start, total_row, block_rows, max_col, template_merges)
         # insert_rows は total_row の直前に挿入するため、
-        # 合計行は total_row + 3 に移動する（find_total_row で再取得）
+        # 合計行は total_row + block_rows に移動する（find_total_row で再取得）
 
     # 挿入された行の入力値をクリア。数式・書式・結合はテンプレートから残す。
     new_total_row = find_total_row(ws, settings)
@@ -216,15 +233,31 @@ def ensure_rows(ws, settings: dict, needed_blocks: int, logger: Logger) -> int:
 
 
 def write_to_destination(ws, settings: dict, blocks: list[dict]) -> None:
-    """明細ブロックを3行単位で転記先に書き込む"""
+    """選択されたレイアウトで明細ブロックを転記先に書き込む。"""
+    layout = settings.get('dst_layout', LAYOUT_3_ROWS)
+    if layout == LAYOUT_1_ROW:
+        _write_1row_layout(ws, settings, blocks)
+    elif layout == LAYOUT_2_ROWS:
+        _write_2row_layout(ws, settings, blocks)
+    else:
+        _write_3row_layout(ws, settings, blocks)
+
+
+def _write_common_values(ws, settings: dict, row: int, block: dict) -> None:
+    """数量・単位・単価をブロック1行目へ書き込む。"""
+    _safe_set(ws, row, settings['dst_col_qty'],   block['qty'])
+    _safe_set(ws, row, settings['dst_col_unit'],  block['unit'])
+    _safe_set(ws, row, settings['dst_col_price'], block['price'])
+
+
+def _write_3row_layout(ws, settings: dict, blocks: list[dict]) -> None:
+    """3行標準：現行帳票向けの配置。"""
     write_row = settings['dst_start_row']
 
     for block in blocks:
         # 行1：仕様1 / 数量 / 単位 / 単価（名称は空のまま）
         _safe_set(ws, write_row,     settings['dst_col_spec'],  block['spec1'])
-        _safe_set(ws, write_row,     settings['dst_col_qty'],   block['qty'])
-        _safe_set(ws, write_row,     settings['dst_col_unit'],  block['unit'])
-        _safe_set(ws, write_row,     settings['dst_col_price'], block['price'])
+        _write_common_values(ws, settings, write_row, block)
         # 行2：名称1 / 仕様2
         _safe_set(ws, write_row + 1, settings['dst_col_name'],  block['name1'])
         _safe_set(ws, write_row + 1, settings['dst_col_spec'],  block['spec2'])
@@ -232,13 +265,44 @@ def write_to_destination(ws, settings: dict, blocks: list[dict]) -> None:
         _safe_set(ws, write_row + 2, settings['dst_col_name'],  block['name2'])
         _safe_set(ws, write_row + 2, settings['dst_col_spec'],  block['spec3'])
 
-        write_row += BLOCK_ROWS
+        write_row += 3
+
+
+def _write_2row_layout(ws, settings: dict, blocks: list[dict]) -> None:
+    """2行標準：上段に1行目情報と数量、下段に主名称と残り仕様を配置。"""
+    write_row = settings['dst_start_row']
+
+    for block in blocks:
+        # 行1：名称1 / 仕様1 / 数量 / 単位 / 単価
+        _safe_set(ws, write_row,     settings['dst_col_name'],  block['name1'])
+        _safe_set(ws, write_row,     settings['dst_col_spec'],  block['spec1'])
+        _write_common_values(ws, settings, write_row, block)
+        # 行2：名称2 / 仕様2・仕様3
+        _safe_set(ws, write_row + 1, settings['dst_col_name'],  block['name2'])
+        _safe_set(ws, write_row + 1, settings['dst_col_spec'],
+                  _join_lines(block['spec2'], block['spec3']))
+
+        write_row += 2
+
+
+def _write_1row_layout(ws, settings: dict, blocks: list[dict]) -> None:
+    """1行標準：名称と仕様をセル内改行で1行に集約して配置。"""
+    write_row = settings['dst_start_row']
+
+    for block in blocks:
+        _safe_set(ws, write_row, settings['dst_col_name'],
+                  _join_lines(block['name1'], block['name2']))
+        _safe_set(ws, write_row, settings['dst_col_spec'],
+                  _join_lines(block['spec1'], block['spec2'], block['spec3']))
+        _write_common_values(ws, settings, write_row, block)
+
+        write_row += 1
 
 
 def rebuild_sum_formula(ws, settings: dict, logger: Logger) -> str:
     """
     金額列のSUM式を完全再生成して合計行に書き込む。
-    開始行から3行おきにブロック1行目のセルを収集して =SUM(...) を組み立てる。
+    開始行からレイアウト行数おきにブロック1行目のセルを収集して =SUM(...) を組み立てる。
     """
     total_row = find_total_row(ws, settings)
     if total_row == 0:
@@ -246,12 +310,13 @@ def rebuild_sum_formula(ws, settings: dict, logger: Logger) -> str:
         return "(SUM式更新スキップ)"
 
     start_row  = settings['dst_start_row']
+    block_rows = get_block_rows(settings)
     col_letter = settings['dst_col_amount'].upper()
     col_idx    = _col(settings['dst_col_amount'])
 
     cell_refs = [
         f"{col_letter}{r}"
-        for r in range(start_row, total_row, BLOCK_ROWS)
+        for r in range(start_row, total_row, block_rows)
     ]
     formula = f"=SUM({','.join(cell_refs)})"
 
